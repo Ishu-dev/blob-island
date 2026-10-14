@@ -1,7 +1,8 @@
 class_name Blob
 extends RigidBody3D
-## Shared body for every blob: physics sphere, health, hit flash, squishy visual, eyes.
-## Set radius/color/accel/max_speed/max_hp/main before add_child(). Subclasses set move_dir.
+## Shared body for every blob: physics sphere, health, team, hit flash, squishy visual,
+## eyes, optional grumpy brows and sharp teeth, liquid footprints.
+## Set the vars below before add_child(). Subclasses set move_dir and facing.
 
 var radius := 0.45
 var color := Color("8fd3ff")
@@ -10,15 +11,24 @@ var max_speed := 6.0
 var speed_mult := 1.0
 var max_hp := 100.0
 var hp := 100.0
+var team := "enemy"
+var teeth := 0
+var voice := 1.0
+var loot := 1
+var prints := true
+var face_locked := false
 var main
 var move_dir := Vector3.ZERO
 var facing := Vector3(0, 0, 1)
 var squash := Vector3.ONE   # extra scale set by jumps and attacks, eased back to 1
+var shield_time := 0.0
 var dead := false
 var visual: Node3D
 var _body_mat: StandardMaterial3D
 var _flash := 0.0
 var _t := 0.0
+var _last_print := Vector3.ZERO
+var _print_side := 1.0
 
 
 func _ready() -> void:
@@ -65,39 +75,76 @@ func _build_visual() -> void:
 	var black := StandardMaterial3D.new()
 	black.albedo_color = Color(0.08, 0.08, 0.12)
 	for side in [-1.0, 1.0]:
-		var eye := MeshInstance3D.new()
-		var em := SphereMesh.new()
-		em.radius = radius * 0.26
-		em.height = radius * 0.52
-		eye.mesh = em
-		eye.material_override = white
-		eye.position = Vector3(side * radius * 0.4, radius * 0.2, radius * 0.68)
-		visual.add_child(eye)
-		var pupil := MeshInstance3D.new()
-		var pm := SphereMesh.new()
-		pm.radius = radius * 0.15
-		pm.height = radius * 0.3
-		pupil.mesh = pm
-		pupil.material_override = black
-		pupil.position = eye.position + Vector3(0, 0, radius * 0.17)
-		visual.add_child(pupil)
+		var eye := _sphere(radius * 0.26, white, Vector3(side * radius * 0.4, radius * 0.2, radius * 0.68))
+		_sphere(radius * 0.15, black, eye.position + Vector3(0, 0, radius * 0.17))
+		if team == "enemy":
+			# Grumpy brows slanting down toward the middle.
+			var brow := MeshInstance3D.new()
+			var bm := BoxMesh.new()
+			bm.size = Vector3(radius * 0.42, radius * 0.09, radius * 0.08)
+			brow.mesh = bm
+			brow.material_override = black
+			brow.position = Vector3(side * radius * 0.36, radius * 0.5, radius * 0.72)
+			brow.rotation.z = side * 0.45
+			visual.add_child(brow)
+
+	if teeth > 0:
+		var mouth := _sphere(radius * 0.5, black, Vector3(0, -radius * 0.2, radius * 0.72))
+		mouth.scale = Vector3(1.0, 0.32, 0.35)
+		var count := clampi(teeth + randi_range(-1, 1), 1, 8)
+		for i in count:
+			var tooth := MeshInstance3D.new()
+			var cone := CylinderMesh.new()
+			var w := radius * randf_range(0.06, 0.1)
+			cone.top_radius = w
+			cone.bottom_radius = 0.0
+			cone.height = radius * randf_range(0.12, 0.22)
+			cone.radial_segments = 6
+			tooth.mesh = cone
+			tooth.material_override = white
+			var x := lerpf(-0.28, 0.28, (i + 0.5) / count) + randf_range(-0.04, 0.04)
+			tooth.position = Vector3(x * radius, -radius * 0.14 - cone.height * 0.4, radius * 0.86)
+			tooth.rotation.z = randf_range(-0.35, 0.35)
+			visual.add_child(tooth)
+
+
+func _sphere(r: float, m: Material, pos: Vector3) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var sm := SphereMesh.new()
+	sm.radius = r
+	sm.height = r * 2.0
+	mi.mesh = sm
+	mi.material_override = m
+	mi.position = pos
+	visual.add_child(mi)
+	return mi
+
+
+func ground_hit() -> Dictionary:
+	var q := PhysicsRayQueryParameters3D.create(global_position, global_position + Vector3.DOWN * (radius + 0.15))
+	q.exclude = [get_rid()]
+	return get_world_3d().direct_space_state.intersect_ray(q)
 
 
 func on_ground() -> bool:
-	var q := PhysicsRayQueryParameters3D.create(global_position, global_position + Vector3.DOWN * (radius + 0.15))
-	q.exclude = [get_rid()]
-	return not get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+	return not ground_hit().is_empty()
 
 
 func take_damage(amount: float, push: Vector3 = Vector3.ZERO) -> void:
 	if dead:
+		return
+	if shield_time > 0.0:
+		main.fx.ring(global_position, Color(0.5, 0.9, 1.0, 0.8), radius * 2.5, 0.25)
+		apply_central_impulse(push * 0.3 * mass)
 		return
 	hp = maxf(hp - amount, 0.0)
 	_flash = 1.0
 	squash = Vector3(1.3, 0.7, 1.3)
 	if push != Vector3.ZERO:
 		apply_central_impulse(push * mass)
-	main.float_text(global_position + Vector3.UP * (radius + 0.5), str(roundi(amount)), Color("ff4d5e") if is_in_group("player") else color)
+	var tc := Color("ff4d5e") if team == "player" else color
+	main.fx.float_text(global_position + Vector3.UP * (radius + 0.5), str(roundi(amount)), tc)
+	main.sfx.play("hurt" if team == "player" else "ow", global_position, voice)
 	if hp <= 0.0:
 		die()
 
@@ -107,11 +154,12 @@ func die() -> void:
 	main.on_blob_died(self)
 	set_deferred("freeze", true)
 	collision_layer = 0
+	main.sfx.play("pop", global_position, voice)
 	var tw := create_tween()
 	tw.tween_property(visual, "scale", Vector3(1.6, 0.35, 1.6), 0.12)
 	tw.tween_callback(func() -> void:
-		main.spawn_splat(global_position + Vector3.DOWN * radius * 0.8, color, 1.5)
-		main.burst(global_position, color, 16))
+		main.fx.splat(global_position + Vector3.DOWN * radius * 0.8, color, radius * 3.2)
+		main.fx.burst(global_position, color, 16))
 	tw.tween_property(visual, "scale", Vector3.ZERO, 0.08)
 	tw.tween_callback(queue_free)
 
@@ -119,6 +167,7 @@ func die() -> void:
 func _process(delta: float) -> void:
 	_flash = maxf(_flash - delta * 5.0, 0.0)
 	_body_mat.emission_energy_multiplier = _flash * 1.5
+	shield_time = maxf(shield_time - delta, 0.0)
 
 
 func _physics_process(delta: float) -> void:
@@ -127,9 +176,21 @@ func _physics_process(delta: float) -> void:
 	var flat_v := Vector3(linear_velocity.x, 0, linear_velocity.z)
 	var moving := move_dir.length() > 0.01
 	if moving:
-		facing = move_dir.normalized()
-		if flat_v.dot(facing) < max_speed * speed_mult:
-			apply_central_force(facing * accel * mass * speed_mult)
+		var dir := move_dir.normalized()
+		if not face_locked:
+			facing = dir
+		if flat_v.dot(dir) < max_speed * speed_mult:
+			apply_central_force(dir * accel * mass * speed_mult)
+
+	# Liquid footprints, alternating left and right, that evaporate after a second or two.
+	if prints and global_position.distance_to(_last_print) > radius * 1.2:
+		var hit := ground_hit()
+		if not hit.is_empty():
+			var side := Vector3(facing.z, 0, -facing.x) * radius * 0.35 * _print_side
+			var at: Vector3 = hit["position"]
+			main.fx.footprint(at + side, color, radius * 0.7)
+			_print_side = -_print_side
+		_last_print = global_position
 
 	# Cosmetic only: turn toward facing, squash with speed, stretch when airborne.
 	_t += delta

@@ -1,31 +1,54 @@
 extends Blob
-## Chases the player, squishes down to wind up, then spits a glob of goo.
-## A bomb blast stuns it and cancels a wind-up.
-
-const Goo := preload("res://scripts/goo.gd")
-
-enum State { CHASE, WINDUP, RECOVER }
-
-const RANGE := 5.0
-const WINDUP_TIME := 0.5
-const GOO_DAMAGE := 12.0
+## Shared brain for enemies and allies: pick the nearest blob on the other team, chase it,
+## hop over terraces and obstacles, grumble now and then. Subclasses add an attack in think().
 
 var target: Blob
 var stun := 0.0
-var state := State.CHASE
-var state_t := 0.0
 var attack_cd := 1.5
+var hop_cd := 1.0
+var hop_power := 6.0
+var keep_distance := 1.0
+var lifetime := -1.0
+var _retarget := 0.0
+var _grumble := 3.0
+var _stuck := 0.0
 
 
 func _ready() -> void:
+	face_locked = true
 	super()
-	add_to_group("enemy")
+	add_to_group("enemy" if team == "enemy" else "ally")
+	if radius < 0.6:
+		add_to_group("grabbable")
+	_grumble = randf_range(1.0, 5.0)
 
 
 func stunned(seconds: float) -> void:
-	stun = seconds
-	if state == State.WINDUP:
-		state = State.CHASE
+	stun = maxf(stun, seconds)
+	interrupt()
+
+
+## Called when a stun lands; attacks that can be cancelled override this.
+func interrupt() -> void:
+	pass
+
+
+func has_target() -> bool:
+	return is_instance_valid(target) and not target.dead
+
+
+func _pick_target() -> Blob:
+	var best: Blob = null
+	var best_d := 30.0
+	for n in get_tree().get_nodes_in_group("actor"):
+		var b := n as Blob
+		if b == null or b.dead or b.team == team:
+			continue
+		var d := b.global_position.distance_to(global_position)
+		if d < best_d:
+			best = b
+			best_d = d
+	return best
 
 
 func _physics_process(delta: float) -> void:
@@ -33,57 +56,67 @@ func _physics_process(delta: float) -> void:
 		return
 	stun -= delta
 	attack_cd -= delta
-	state_t -= delta
+	hop_cd -= delta
+	_retarget -= delta
+	_grumble -= delta
+	if lifetime > 0.0:
+		lifetime -= delta
+		if lifetime <= 0.0:
+			die()
+			return
+	if _retarget <= 0.0 or not has_target():
+		target = _pick_target()
+		_retarget = 0.6
 	move_dir = Vector3.ZERO
-	var has_target := is_instance_valid(target) and not target.dead
-	var to_target := Vector3.ZERO
-	if has_target:
-		to_target = target.global_position - global_position
-		to_target.y = 0.0
-
-	match state:
-		State.CHASE:
-			if stun <= 0.0 and has_target:
-				var dist := to_target.length()
-				if dist > 0.01:
-					facing = to_target.normalized()
-				if dist < RANGE and attack_cd <= 0.0 and on_ground():
-					state = State.WINDUP
-					state_t = WINDUP_TIME
-				elif dist > 1.0:
-					move_dir = to_target.normalized()
-		State.WINDUP:
-			if has_target and to_target.length() > 0.01:
-				facing = to_target.normalized()
-			var k := 1.0 - state_t / WINDUP_TIME
-			var shiver := sin(state_t * 60.0) * 0.04 * k
-			squash = Vector3(1.0 + 0.4 * k + shiver, 1.0 - 0.45 * k, 1.0 + 0.4 * k - shiver)
-			if state_t <= 0.0:
-				if has_target:
-					_spit()
-				state = State.RECOVER
-				state_t = 0.5
-				squash = Vector3(0.7, 1.5, 0.7)
-		State.RECOVER:
-			if state_t <= 0.0:
-				state = State.CHASE
-				attack_cd = randf_range(1.6, 2.8)
+	if stun <= 0.0:
+		think(delta)
+	if _grumble <= 0.0:
+		_grumble = randf_range(3.0, 7.0)
+		main.sfx.play("grumble%d" % randi_range(0, 2), global_position, voice)
 	super(delta)
 
 
-func _spit() -> void:
-	var start := global_position + facing * radius * 0.9 + Vector3.UP * 0.15
-	var dist := Vector2(target.global_position.x - start.x, target.global_position.z - start.z).length()
-	var t := clampf(0.3 + dist * 0.08, 0.35, 0.8)
-	# Lead the target a little and miss a little, so dodging is possible.
-	var aim := target.global_position + target.linear_velocity * t * 0.5
-	aim += Vector3(randf_range(-0.4, 0.4), 0, randf_range(-0.4, 0.4))
-	var g := Goo.new()
-	g.main = main
-	g.color = color
-	g.shooter = self
-	g.damage = GOO_DAMAGE
-	main.add_child(g)
-	g.global_position = start
-	g.vel = main.ballistic(start, aim, t, Goo.GRAVITY)
-	apply_central_impulse(-facing * 1.2 * mass)
+func flat_to_target() -> Vector3:
+	var d := target.global_position - global_position
+	d.y = 0.0
+	return d
+
+
+func face_target() -> void:
+	if has_target():
+		var d := flat_to_target()
+		if d.length() > 0.01:
+			facing = d.normalized()
+
+
+func think(delta: float) -> void:
+	chase(delta)
+
+
+## Moves toward the target while keeping some distance, hopping when blocked. Returns distance.
+func chase(delta: float) -> float:
+	if not has_target():
+		return INF
+	var to := flat_to_target()
+	var dist := to.length()
+	if dist > 0.01:
+		facing = to / dist
+	if dist > keep_distance:
+		move_dir = facing
+	elif dist < keep_distance * 0.6:
+		move_dir = -facing
+	hop(delta)
+	return dist
+
+
+func hop(delta: float) -> void:
+	var flat_speed := Vector2(linear_velocity.x, linear_velocity.z).length()
+	if move_dir != Vector3.ZERO and flat_speed < 0.7:
+		_stuck += delta
+	else:
+		_stuck = 0.0
+	if hop_cd <= 0.0 and (_stuck > 0.3 or randf() < delta * 0.35) and on_ground():
+		apply_central_impulse((Vector3.UP * hop_power + move_dir * 1.5) * mass)
+		squash = Vector3(0.75, 1.35, 0.75)
+		hop_cd = randf_range(0.9, 2.2)
+		_stuck = 0.0

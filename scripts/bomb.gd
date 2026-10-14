@@ -161,32 +161,8 @@ func _process(delta: float) -> void:
 
 
 func explode() -> void:
-	for node in get_tree().get_nodes_in_group("actor"):
-		var b := node as Blob
-		if b == null or b.dead:
-			continue
-		var d := b.global_position - global_position
-		var dist := d.length()
-		if dist > RADIUS:
-			continue
-		var falloff := 1.0 - dist / RADIUS
-		var flat := Vector3(d.x, 0, d.z)
-		var dir: Vector3 = flat.normalized() if flat.length() > 0.05 else Vector3.ZERO
-		var push := (dir * FORCE + Vector3.UP * 6.0) * falloff
-		var dmg := DAMAGE * (0.35 + 0.65 * falloff)
-		if b == thrower:
-			dmg *= 0.3   # self-damage stays, but small
-		if b.has_method("stunned"):
-			b.stunned(1.2)
-		b.take_damage(dmg, push)
-	# Chain reaction: nearby bombs get flung and their fuses shortened.
-	for node in get_tree().get_nodes_in_group("bomb"):
-		if node == self:
-			continue
-		var other = node
-		var d2: Vector3 = other.global_position - global_position
-		if d2.length() < RADIUS:
-			other.apply_central_impulse((d2.normalized() * 4.0 + Vector3.UP * 3.0) * other.mass)
-			other.fuse = minf(other.fuse, 0.25)
-	main.explosion(global_position, RADIUS)
+	main.blast(global_position, RADIUS, FORCE, DAMAGE, "player", 6.0, self)
+	main.fx.explosion(global_position, RADIUS)
+	main.sfx.play("boom", global_position)
+	main.shake = maxf(main.shake, 0.7)
 	queue_free()
