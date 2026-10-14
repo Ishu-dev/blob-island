@@ -101,7 +101,10 @@ func think(delta: float) -> void:
 
 func _choose(dist: float) -> void:
 	var options := ["slam", "volley", "volley"]
-	if dist > 5.0:
+	# Up on the roof or upstairs? The king jumps up after you.
+	if target.global_position.y - global_position.y > 1.5:
+		options = ["leap", "leap", "volley"]
+	elif dist > 5.0:
 		options.append_array(["leap", "leap"])
 	if get_tree().get_nodes_in_group("enemy").size() < 6:
 		options.append("summon")
@@ -121,7 +124,7 @@ func _volley() -> void:
 	squash = Vector3(0.75, 1.5, 0.75)
 	var start := global_position + Vector3.UP * radius
 	for i in 10:
-		var aim := target.global_position + Vector3(randf_range(-3.5, 3.5), 0, randf_range(-3.5, 3.5))
+		var aim: Vector3 = target.global_position + Vector3(randf_range(-3.5, 3.5), 0, randf_range(-3.5, 3.5))
 		var t := randf_range(0.8, 1.2)
 		main.shoot(start, main.ballistic(start, aim, t, 14.0), color, team, 14.0, 14.0, 0.24, self, true, 3.0)
 	main.sfx.play("blorp", global_position, 0.5)

@@ -2,7 +2,8 @@ extends Blob
 ## Shared brain for enemies and allies: pick the nearest blob on the other team, chase it,
 ## hop over terraces and obstacles, grumble now and then. Subclasses add an attack in think().
 
-var target: Blob
+var target          # a Blob or a Structure (anything with dead/team/hp)
+var routes := true
 var stun := 0.0
 var attack_cd := 1.5
 var hop_cd := 1.0
@@ -37,17 +38,17 @@ func has_target() -> bool:
 	return is_instance_valid(target) and not target.dead
 
 
-func _pick_target() -> Blob:
-	var best: Blob = null
+func _pick_target():
+	var best = null
 	var best_d := 30.0
-	for n in get_tree().get_nodes_in_group("actor"):
-		var b := n as Blob
-		if b == null or b.dead or b.team == team:
-			continue
-		var d := b.global_position.distance_to(global_position)
-		if d < best_d:
-			best = b
-			best_d = d
+	for group in ["actor", "target_structure"]:
+		for b in get_tree().get_nodes_in_group(group):
+			if b.dead or b.team == team or b == self:
+				continue
+			var d: float = b.global_position.distance_to(global_position)
+			if d < best_d:
+				best = b
+				best_d = d
 	return best
 
 
@@ -77,7 +78,7 @@ func _physics_process(delta: float) -> void:
 
 
 func flat_to_target() -> Vector3:
-	var d := target.global_position - global_position
+	var d: Vector3 = target.global_position - global_position
 	d.y = 0.0
 	return d
 
@@ -99,6 +100,18 @@ func chase(delta: float) -> float:
 		return INF
 	var to := flat_to_target()
 	var dist := to.length()
+	# If the target is somewhere we can't walk straight to (upstairs, on the roof, over
+	# the bridge), the world tells us the next waypoint: door, ramp, lift, bridge.
+	if routes and main.world:
+		var goal: Vector3 = main.world.route_point(global_position, target.global_position)
+		if goal.distance_to(target.global_position) > 0.1:
+			var g := goal - global_position
+			g.y = 0.0
+			if g.length() > 0.15:
+				facing = g.normalized()
+				move_dir = facing
+			hop(delta)
+			return dist
 	if dist > 0.01:
 		facing = to / dist
 	if dist > keep_distance:

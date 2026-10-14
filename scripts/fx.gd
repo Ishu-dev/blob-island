@@ -333,3 +333,43 @@ func gather(at: Vector3, c: Color, duration: float, done: Callable) -> void:
 	ct.tween_callback(core.queue_free)
 	ct.tween_callback(done)
 	ring(at + Vector3.DOWN * 0.4, Color(c.r, c.g, c.b, 0.6), 1.5, duration)
+
+
+## Big pickup moment: spinning sunburst, staggered rings, a spiral of sparkles, a flash.
+func powerup_burst(at: Vector3, c: Color) -> void:
+	var root := Node3D.new()
+	add_child(root)
+	root.global_position = at
+	var m := _fresh(Color(c.r, c.g, c.b, 0.85))
+	for i in 12:
+		var ray := MeshInstance3D.new()
+		ray.mesh = unit_box
+		ray.material_override = m
+		ray.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		var a := TAU * i / 12.0
+		ray.scale = Vector3(0.07, 0.02, 1.2 if i % 2 == 0 else 0.7)
+		ray.rotation.y = a
+		ray.position = Vector3(sin(a), 0, cos(a)) * 0.9
+		root.add_child(ray)
+	root.scale = Vector3.ONE * 0.2
+	var tw := root.create_tween().set_parallel()
+	tw.tween_property(root, "scale", Vector3.ONE * 1.8, 0.5).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	tw.tween_property(root, "rotation:y", PI, 0.8)
+	tw.tween_property(m, "albedo_color:a", 0.0, 0.4).set_delay(0.4)
+	tw.chain().tween_callback(root.queue_free)
+	for i in 3:
+		get_tree().create_timer(i * 0.12).timeout.connect(ring.bind(at + Vector3.UP * (i * 0.3), Color(c.r, c.g, c.b, 0.9), 2.5 + i, 0.45))
+	var sparkle := mat(c.lightened(0.3), true)
+	for i in 18:
+		var a := TAU * i / 18.0
+		var v := Vector3(cos(a + PI / 2.0), 0, sin(a + PI / 2.0)) * 3.0 + Vector3.UP * rng.randf_range(3.0, 6.0)
+		particle(at + Vector3(cos(a), 0, sin(a)) * 0.6, v, rng.randf_range(0.08, 0.14), 0.8, sparkle, 4.0)
+	var light := OmniLight3D.new()
+	light.light_color = c
+	light.omni_range = 5.0
+	light.light_energy = 5.0
+	add_child(light)
+	light.global_position = at + Vector3.UP
+	var lt := light.create_tween()
+	lt.tween_property(light, "light_energy", 0.0, 0.6)
+	lt.tween_callback(light.queue_free)

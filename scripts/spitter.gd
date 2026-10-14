@@ -48,7 +48,7 @@ func _spit() -> void:
 	var dist := Vector2(target.global_position.x - start.x, target.global_position.z - start.z).length()
 	var t := clampf(0.3 + dist * 0.08, 0.35, 0.8)
 	# Lead the target a little and miss a little, so dodging is possible.
-	var aim := target.global_position + target.linear_velocity * t * 0.5
+	var aim: Vector3 = target.global_position + target.linear_velocity * t * 0.5
 	aim += Vector3(randf_range(-0.4, 0.4), 0, randf_range(-0.4, 0.4))
 	main.shoot(start, main.ballistic(start, aim, t, 14.0), color, team, damage, 14.0, 0.17, self, true, 2.5)
 	main.sfx.play("blorp", global_position, voice)

@@ -10,6 +10,7 @@ var _bump_cd := 0.0
 func _ready() -> void:
 	prints = false
 	keep_distance = 0.4
+	routes = false
 	super()
 	gravity_scale = 0.0
 	linear_damp = 2.5
@@ -44,6 +45,9 @@ func think(delta: float) -> void:
 		var p: Vector3 = hit["position"]
 		ground_y = p.y
 	var goal := ground_y + HOVER + sin(_t * 2.0) * 0.12
+	# Rise to meet a target that is up high (on a roof or upper floor).
+	if has_target() and target.global_position.y > ground_y + 1.0 and flat_to_target().length() < 4.0:
+		goal = maxf(goal, target.global_position.y + 0.5)
 	apply_central_force(Vector3.UP * ((goal - global_position.y) * 25.0 - linear_velocity.y * 5.0) * mass)
 
 
@@ -51,7 +55,7 @@ func _physics_process(delta: float) -> void:
 	_bump_cd -= delta
 	if not dead:
 		var p = main.player
-		if is_instance_valid(p) and not p.dead:
+		if is_instance_valid(p) and not p.dead and net_t <= 0.0:
 			var rel: Vector3 = p.global_position - global_position
 			var flat := Vector2(rel.x, rel.z).length()
 			if flat < radius + p.radius * 0.9 and rel.y > radius * 0.5 and rel.y < radius + p.radius + 0.35 and p.linear_velocity.y < 1.0:

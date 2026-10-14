@@ -82,7 +82,7 @@ func think(delta: float) -> void:
 
 func _fire() -> void:
 	var muzzle := _gun.global_position + facing * 0.3
-	var aim := target.global_position + Vector3.UP * 0.1
+	var aim: Vector3 = target.global_position + Vector3.UP * 0.1
 	var dir := (aim - muzzle).normalized().rotated(Vector3.UP, randf_range(-0.08, 0.08))
 	main.shoot(muzzle, dir * 13.0, Color("ffcc66"), team, 7.0, 1.0, 0.08, self, false, 1.5)
 	main.sfx.play("pew", global_position, 0.7)

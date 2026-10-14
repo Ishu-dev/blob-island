@@ -2,7 +2,7 @@ extends Control
 ## Screen-space health bar that follows a blob. The fill snaps down on a hit, a white
 ## "ghost" segment lingers and then drains, and the bar punches up in size.
 
-var target: Blob
+var target
 var camera: Camera3D
 var fill_color := Color("ff5d73")
 var bar_width := 44.0
@@ -23,7 +23,7 @@ func _process(delta: float) -> void:
 		queue_free()
 		return
 	visible = not target.dead and target.global_position.y > -0.4
-	var frac := clampf(target.hp / target.max_hp, 0.0, 1.0)
+	var frac: float = clampf(target.hp / target.max_hp, 0.0, 1.0)
 	if frac < _last - 0.001:
 		_hold = 0.35
 		scale = Vector2(1.3, 1.6)
@@ -35,7 +35,7 @@ func _process(delta: float) -> void:
 	if _hold <= 0.0:
 		_ghost = move_toward(_ghost, _shown, 0.8 * delta)
 	scale = scale.lerp(Vector2.ONE, 10.0 * delta)
-	var wp := target.global_position + Vector3.UP * (target.radius + 0.55)
+	var wp: Vector3 = target.global_position + Vector3.UP * (target.radius + 0.55)
 	position = camera.unproject_position(wp) - pivot_offset
 	queue_redraw()
 
