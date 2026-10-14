@@ -125,7 +125,7 @@ func _impact(hit: Dictionary, body: Object) -> bool:
 	var push := Vector3(vel.x, 0, vel.z).normalized() * knock
 	match kind:
 		"rocket":
-			main.blast(at, 2.8, 13.0, 45.0, team, 6.0, null)
+			main.blast(at, 2.8, 13.0, damage if damage > 0.0 else 45.0, team, 6.0, null)
 			main.fx.explosion(at, 2.8)
 			main.sfx.play("boom", at, 1.1)
 			main.shake = maxf(main.shake, 0.7)

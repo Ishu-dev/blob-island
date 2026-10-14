@@ -2,6 +2,7 @@ extends Blob
 ## The blob you control. Moves relative to the camera, faces the mouse, has stubby hands
 ## that punch, hold the current weapon, or grab things (Shift). Climbs ladders.
 ## Weapons have limited ammo; when a gun runs dry it is dropped and you're back to fists.
+## F gets in or out of a nearby car. Jumping while running does a front flip.
 
 const JUMP_SPEED := 7.5
 const GUNS := {
@@ -15,6 +16,7 @@ const GUNS := {
 	"rocket": {"name": "ROCKETS", "ammo": 4},
 }
 const MAX_SLOTS := 6
+const THROW_RANGE := 8.0
 
 var inventory: Array[Dictionary] = []
 var slot := 0
@@ -24,6 +26,11 @@ var held: RigidBody3D
 var aim_dir := Vector3(0, 0, 1)
 var speed_t := 0.0
 var magnet_t := 0.0
+var jump_speed := JUMP_SPEED
+var perk := ""
+var vehicle: Node3D
+var _air_jumps := 0
+var _aim_point := Vector3.ZERO
 var _coyote := 0.0
 var _jump_buffer := 0.0
 var _was_air := false
@@ -48,7 +55,10 @@ func _ready() -> void:
 	team = "player"
 	face_locked = true
 	super()
-	inventory = [{"id": "fist", "ammo": -1}, {"id": "bomb", "ammo": 6}]
+	inventory = [{"id": "fist", "ammo": -1}, {"id": "bomb", "ammo": _ammo_for("bomb")}]
+	var starter: String = main.profile.equip["gun"]
+	if starter != "bomb" and GUNS.has(starter):
+		inventory.append({"id": starter, "ammo": _ammo_for(starter)})
 	_rig = Node3D.new()
 	add_child(_rig)
 	var hand_mat := StandardMaterial3D.new()
@@ -156,9 +166,18 @@ func select_slot(i: int) -> void:
 	main.sfx.play("click", null, 1.0 + i * 0.1)
 
 
+func _ammo_for(id: String) -> int:
+	var base: int = GUNS[id]["ammo"]
+	return base if base < 0 else int(round(base * main.profile.ammo_mult(id)))
+
+
+func _dmg(id: String, base: float) -> float:
+	return base * main.profile.gun_mult(id)
+
+
 func give_weapon(id: String, ammo := -2) -> void:
 	if ammo == -2:
-		ammo = GUNS[id]["ammo"]
+		ammo = _ammo_for(id)
 	for i in inventory.size():
 		if inventory[i]["id"] == id:
 			inventory[i]["ammo"] += ammo
@@ -189,6 +208,7 @@ func bounce(vy: float) -> void:
 
 
 func die() -> void:
+	leave_vehicle()
 	dead = true
 	_drop_held()
 	_beam.visible = false
@@ -207,6 +227,31 @@ func respawn(at: Vector3) -> void:
 	visible = true
 	shield_time = 2.0
 	squash = Vector3(0.5, 1.6, 0.5)
+	trick("spin", 0.6, 1.0)
+
+
+func enter_vehicle(v: Node3D) -> void:
+	_drop_held()
+	vehicle = v
+	v.enter(self)
+	freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+	freeze = true
+	prints = false
+	ladders = 0
+	trick("flip", 0.45, 1.0)
+
+
+func leave_vehicle() -> void:
+	if vehicle == null:
+		return
+	var v := vehicle
+	vehicle = null
+	if is_instance_valid(v):
+		v.eject()
+	freeze = false
+	prints = true
+	linear_velocity = Vector3(0, 5.0, 0)
+	trick("flip", 0.5, 1.0)
 
 
 func _physics_process(delta: float) -> void:
@@ -214,6 +259,24 @@ func _physics_process(delta: float) -> void:
 		return
 	speed_t -= delta
 	magnet_t -= delta
+	if perk == "regen" and hp < max_hp:
+		hp = minf(hp + 3.0 * delta, max_hp)
+	if Input.is_action_just_pressed("drive"):
+		if vehicle:
+			leave_vehicle()
+		else:
+			var v := _nearest_vehicle()
+			if v:
+				enter_vehicle(v)
+	if vehicle:
+		if not is_instance_valid(vehicle):
+			vehicle = null
+			freeze = false
+			prints = true
+		else:
+			move_dir = Vector3.ZERO
+			super(delta)
+			return
 	var iv := Input.get_vector("move_left", "move_right", "move_up", "move_down")
 	move_dir = main.screen_to_world(iv)
 	speed_mult = main.fx.goo_slow(global_position) * (1.7 if speed_t > 0.0 else 1.0)
@@ -223,13 +286,24 @@ func _physics_process(delta: float) -> void:
 	var grounded := on_ground()
 	_coyote = 0.12 if grounded else _coyote - delta
 	_jump_buffer = 0.12 if Input.is_action_just_pressed("jump") else _jump_buffer - delta
+	if grounded:
+		_air_jumps = 1 if perk == "double_jump" else 0
 	if _jump_buffer > 0.0 and _coyote > 0.0 and rag_t <= 0.0:
-		apply_central_impulse(Vector3.UP * (JUMP_SPEED - linear_velocity.y) * mass)
+		apply_central_impulse(Vector3.UP * (jump_speed - linear_velocity.y) * mass)
 		_jump_buffer = 0.0
 		_coyote = 0.0
 		squash = Vector3(0.7, 1.4, 0.7)
 		main.fx.dust(global_position + Vector3.DOWN * radius)
 		main.sfx.play("jump", global_position)
+		if Vector2(linear_velocity.x, linear_velocity.z).length() > 3.5:
+			trick("flip", 0.5, 1.0)
+	elif _jump_buffer > 0.0 and _air_jumps > 0 and ladders == 0 and rag_t <= 0.0:
+		_air_jumps -= 1
+		_jump_buffer = 0.0
+		apply_central_impulse(Vector3.UP * (jump_speed * 0.9 - linear_velocity.y) * mass)
+		trick("flip", 0.4, 1.0)
+		main.fx.ring(global_position + Vector3.DOWN * radius, Color(1, 1, 1, 0.8), 1.0, 0.25)
+		main.sfx.play("jump", global_position, 1.3)
 
 	if not grounded:
 		_fall_speed = minf(_fall_speed, linear_velocity.y)
@@ -257,6 +331,8 @@ func _process(delta: float) -> void:
 	_punch_t -= delta
 	_combo_t -= delta
 	_rig.rotation.y = lerp_angle(_rig.rotation.y, atan2(aim_dir.x, aim_dir.z) - rotation.y, 15.0 * delta)
+	_rig.rotation.x = visual.rotation.x
+	_rig.rotation.z = visual.rotation.z
 	_rig.scale = visual.scale
 	_gun_root.scale = _gun_root.scale.lerp(Vector3.ONE, 12.0 * delta)
 	_gun_root.position = _gun_root.position.lerp(Vector3(0.5, -0.02, 0.3), 12.0 * delta)
@@ -279,6 +355,7 @@ func _process(delta: float) -> void:
 ## Called every frame by main with the mouse state.
 func weapon_update(delta: float, aim_point: Vector3, pressed: bool, just: bool) -> void:
 	fire_cd -= delta
+	_aim_point = aim_point
 	var flat := Vector3(aim_point.x - global_position.x, 0, aim_point.z - global_position.z)
 	if flat.length() > 0.15:
 		aim_dir = flat.normalized()
@@ -288,6 +365,8 @@ func weapon_update(delta: float, aim_point: Vector3, pressed: bool, just: bool) 
 	if held:
 		if just:
 			_throw_held()
+		return
+	if vehicle and is_instance_valid(vehicle) and vehicle.get("_turret"):
 		return
 	var id := weapon_id()
 	match id:
@@ -302,14 +381,14 @@ func weapon_update(delta: float, aim_point: Vector3, pressed: bool, just: bool) 
 				_use_ammo()
 		"blaster":
 			if pressed and fire_cd <= 0.0:
-				_shoot(aim_point, 1, 6.0, 20.0, 6.0, 0.8, Color("4de1ff"), 0.08, 1.0, "bullet")
+				_shoot(aim_point, 1, 6.0, 20.0, _dmg(id, 6.0), 0.8, Color("4de1ff"), 0.08, 1.0, "bullet")
 				fire_cd = 0.09
 				main.sfx.play("pew", global_position)
 				_kick(0.06)
 				_use_ammo()
 		"splatter":
 			if just and fire_cd <= 0.0:
-				_shoot(aim_point, 7, 34.0, 16.0, 7.0, 2.2, Color("ffb347"), 0.1, 3.0, "bullet")
+				_shoot(aim_point, 7, 34.0, 16.0, _dmg(id, 7.0), 2.2, Color("ffb347"), 0.1, 3.0, "bullet")
 				fire_cd = 0.75
 				apply_central_impulse(-aim_dir * 2.0 * mass)
 				main.sfx.play("shotgun", global_position)
@@ -318,14 +397,14 @@ func weapon_update(delta: float, aim_point: Vector3, pressed: bool, just: bool) 
 				_use_ammo()
 		"crossbow":
 			if just and fire_cd <= 0.0:
-				_shoot(aim_point, 1, 0.0, 28.0, 30.0, 3.0, Color("e8d8b0"), 0.06, 1.0, "bolt")
+				_shoot(aim_point, 1, 0.0, 28.0, _dmg(id, 30.0), 3.0, Color("e8d8b0"), 0.06, 1.0, "bolt")
 				fire_cd = 0.6
 				main.sfx.play("twang", global_position)
 				_kick(0.12)
 				_use_ammo()
 		"netgun":
 			if just and fire_cd <= 0.0:
-				_shoot(aim_point, 1, 0.0, 13.0, 2.0, 0.5, Color("b6ff8a"), 0.12, 5.0, "net")
+				_shoot(aim_point, 1, 0.0, 13.0, _dmg(id, 2.0), 0.5, Color("b6ff8a"), 0.12, 5.0, "net")
 				fire_cd = 0.8
 				main.sfx.play("net", global_position)
 				_kick(0.12)
@@ -335,7 +414,7 @@ func weapon_update(delta: float, aim_point: Vector3, pressed: bool, just: bool) 
 				_fire_laser(delta)
 		"rocket":
 			if just and fire_cd <= 0.0:
-				_shoot(aim_point, 1, 0.0, 14.0, 0.0, 0.0, Color("ff5a3d"), 0.1, 0.5, "rocket")
+				_shoot(aim_point, 1, 0.0, 14.0, _dmg(id, 45.0), 0.0, Color("ff5a3d"), 0.1, 0.5, "rocket")
 				fire_cd = 1.0
 				apply_central_impulse(-aim_dir * 3.0 * mass)
 				main.sfx.play("rocket", global_position)
@@ -385,7 +464,7 @@ func _fire_laser(delta: float) -> void:
 		main.sfx.play("laser", global_position, 1.0, -8.0)
 		main.fx.burst(to, Color(1.0, 0.4, 0.5), 2)
 		if body and body.has_method("take_damage") and body.get("team") != team:
-			body.take_damage(4.0)
+			body.take_damage(_dmg("laser", 4.0))
 		elif body and body.has_method("shatter"):
 			body.shatter()
 		_use_ammo()
@@ -414,11 +493,14 @@ func _punch() -> void:
 			if Vector2(d.x, d.z).length() > reach or absf(d.y) > 1.2 or d.normalized().dot(aim_dir) < 0.3:
 				continue
 			hit_any = true
-			var push := aim_dir * (14.0 if big else 9.0) + Vector3.UP * (8.0 if big else 4.0)
+			var strong := 1.6 if perk == "punch" else 1.0
+			var push := (aim_dir * (14.0 if big else 9.0) + Vector3.UP * (8.0 if big else 4.0)) * sqrt(strong)
 			if rb is Blob:
 				var b := rb as Blob
-				b.take_damage(25.0 if big else 14.0, push)
+				b.take_damage((25.0 if big else 14.0) * strong, push)
 				b.ragdoll(1.6 if big else 0.9)
+				if big:
+					b.trick("barrel", 0.6, 2.0)
 			else:
 				rb.apply_central_impulse(push * rb.mass * 0.6)
 	for g in get_tree().get_nodes_in_group("glass"):
@@ -429,6 +511,7 @@ func _punch() -> void:
 		main.shake = maxf(main.shake, 0.5 if big else 0.25)
 		if big:
 			main.fx.float_text(global_position + aim_dir + Vector3.UP, "POW!", Color("ffe066"), 60)
+			trick("spin", 0.35, 1.0)
 
 
 # ---------- grabbing ----------
@@ -440,7 +523,7 @@ func _update_grab(delta: float) -> void:
 			if is_instance_valid(_released):
 				remove_collision_exception_with(_released)
 			_released = null
-	var g := Input.is_action_pressed("grab")
+	var g := Input.is_action_pressed("grab") and vehicle == null
 	if g and not _grab_was and held == null and rag_t <= 0.0:
 		held = _find_grabbable()
 		if held:
@@ -473,10 +556,34 @@ func _find_grabbable() -> RigidBody3D:
 	return best
 
 
+## Where a held thing will land: the cursor, clamped to throwing range.
+func throw_target() -> Vector3:
+	var start := held.global_position if held else global_position
+	var flat := Vector3(_aim_point.x - start.x, 0, _aim_point.z - start.z)
+	if flat.length() > THROW_RANGE:
+		flat = flat.normalized() * THROW_RANGE
+	return Vector3(start.x + flat.x, _aim_point.y + 0.4, start.z + flat.z)
+
+
+func throw_time() -> float:
+	var start := held.global_position if held else global_position
+	var t := throw_target()
+	return clampf(0.35 + Vector2(t.x - start.x, t.z - start.z).length() * 0.06, 0.4, 0.95)
+
+
 func _throw_held() -> void:
 	if held == null:
 		return
-	held.linear_velocity = aim_dir * 9.0 + Vector3.UP * 4.5 + Vector3(linear_velocity.x, 0, linear_velocity.z) * 0.5
+	# A lob that lands on the cursor. Damping is switched off for the flight so it arrives.
+	var g := 9.8 * held.gravity_scale
+	var flight := throw_time()
+	held.linear_velocity = main.ballistic(held.global_position, throw_target(), flight, g)
+	var rb := held
+	var damp := rb.linear_damp
+	rb.linear_damp = 0.0
+	get_tree().create_timer(flight + 0.1).timeout.connect(func() -> void:
+		if is_instance_valid(rb):
+			rb.linear_damp = 6.0 if rb is Blob and (rb as Blob).net_t > 0.0 else damp)
 	if held is Blob:
 		(held as Blob).ragdoll(1.2)
 	if held.has_method("thrown"):
@@ -486,6 +593,19 @@ func _throw_held() -> void:
 	held = null
 	squash = Vector3(1.25, 0.8, 1.25)
 	main.sfx.play("throw", global_position)
+
+
+func _nearest_vehicle() -> Node3D:
+	var best: Node3D = null
+	var best_d := 2.6
+	for v in get_tree().get_nodes_in_group("vehicle"):
+		if v.dead or v.driver != null:
+			continue
+		var d: float = (v as Node3D).global_position.distance_to(global_position)
+		if d < best_d:
+			best = v
+			best_d = d
+	return best
 
 
 func _drop_held() -> void:

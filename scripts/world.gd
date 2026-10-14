@@ -1,8 +1,9 @@
 extends Node3D
-## Builds one random island and its set pieces: terraces, trees, rocks, a two-floor
-## building (ramp inside, ladder outside, breakable windows, elevator to the roof chest),
-## trampolines, a railway with a passing train, crates and barrels, and a small islet
-## reached by a drawbridge that only opens while a crate sits on its pressure plate.
+## Builds one random island and its set pieces: terraces, a stacked hill (one tier per
+## level, up to four), jump ramps for cars, trees, rocks, a one-floor building (ladder
+## outside, breakable windows, elevator to a roof you can build turrets on), trampolines,
+## a railway with a passing train, crates and barrels, and a small islet reached by a
+## drawbridge that only opens while a crate sits on its pressure plate.
 ## Also answers routing questions so enemies know how to reach you.
 
 const Glass := preload("res://scripts/glass.gd")
@@ -15,7 +16,7 @@ const Plate := preload("res://scripts/plate.gd")
 const SIZE := 36
 const STEP := 0.35
 const BASE := -1.0
-const FLOOR_H := 2.2
+const FLOOR_H := 2.6
 const WALL_T := 0.2
 const BW := 6.0
 const BD := 6.0
@@ -33,6 +34,11 @@ var land_tiles: Array[Vector3] = []   # tiles enemies may spawn on
 var spawn_point := Vector3.ZERO
 var chest_point := Vector3.ZERO
 var gold_point := Vector3.ZERO
+var car_spots: Array[Vector3] = []
+var hill_top := Vector3.ZERO
+var tiers := 1
+var _hill_room := 99.0
+var _busy: Array[Vector3] = []   # trampolines and ramps: keep cars off them
 var coin_spots: Array[Vector3] = []
 var buildings: Array[Dictionary] = []
 var mats := {}
@@ -49,9 +55,10 @@ var _hinge_b := Vector3.ZERO
 var _edges := {}         # routing graph: "from>to" -> {a, b, kind}
 
 
-func build(seed_value: int, biome_index: int) -> void:
+func build(seed_value: int, biome_index: int, hill_tiers := 1) -> void:
 	rng.seed = seed_value
 	biome = biome_index % BIOMES.size()
+	tiers = clampi(hill_tiers, 1, 4)
 	_make_mats()
 
 	var noise := FastNoiseLite.new()
@@ -113,6 +120,15 @@ func build(seed_value: int, biome_index: int) -> void:
 			_levels[c] = 1
 			islet_cells.append(c)
 
+	# The hill: a flat pad away from the building, railway, spawn and bridge.
+	var hill_r := 3.2 + tiers * 0.7
+	var hill_cell := _pick_hill(keep, bcx, bcz, tz, row_edge, cz, hill_r)
+	hill_r = minf(hill_r, maxf(_hill_room, 2.6))
+	for cell in keep.keys():
+		if Vector2(cell - hill_cell).length() < hill_r + 0.5 and not _reserved.has(cell):
+			_levels[cell] = 1
+			_reserved[cell] = true
+
 	var free_tiles: Array[Vector3] = []
 	for cell in keep.keys():
 		var level: int = _levels[cell]
@@ -139,9 +155,11 @@ func build(seed_value: int, biome_index: int) -> void:
 	_railway(track_z)
 	_building(0, bpos)
 	_islet(row_edge, extreme, cz)
+	_hill(Vector3(hill_cell.x - _half + 0.5, STEP, hill_cell.y - _half + 0.5), hill_r)
 
 	# Trampolines: one beside the building (a shortcut to the roof), a few elsewhere.
 	_trampoline(bpos + Vector3(-BW / 2.0 - 0.6, 0, 1.5))
+	_busy.append(bpos + Vector3(-BW / 2.0 - 0.6, 0, 1.5))
 	free_tiles.shuffle()
 	var placed := 0
 	for t in free_tiles:
@@ -149,6 +167,7 @@ func build(seed_value: int, biome_index: int) -> void:
 			break
 		if Vector2(t.x, t.z).length() > 4.0:
 			_trampoline(t)
+			_busy.append(t)
 			placed += 1
 	for i in range(3, mini(free_tiles.size(), 13)):
 		_prop("barrel" if i % 3 == 0 else "crate", free_tiles[i] + Vector3.UP * 0.6)
@@ -156,7 +175,197 @@ func build(seed_value: int, biome_index: int) -> void:
 	_prop("barrel", bpos + Vector3(1.0, 0.6, 1.5))
 	for i in range(13, mini(free_tiles.size(), 45)):
 		coin_spots.append(free_tiles[i] + Vector3.UP * 0.45)
+	# Jump ramps for cars, and two parking spots near the spawn.
+	var ramps := 0
+	for i in range(45, free_tiles.size()):
+		if ramps >= 2 + tiers / 2:
+			break
+		var t := free_tiles[i]
+		if _flat_around(t, 2) and _clear_of_busy(t, 3.0) and Vector2(t.x, t.z).distance_to(Vector2(spawn_point.x, spawn_point.z)) > 5.0:
+			_ramp(t, rng.randf() * TAU)
+			_busy.append(t)
+			ramps += 1
+	for t in free_tiles:
+		if car_spots.size() >= 2:
+			break
+		var d := Vector2(t.x - spawn_point.x, t.z - spawn_point.z).length()
+		if d > 2.5 and d < 8.0 and _flat_around(t, 1) and _clear_of_busy(t, 2.5):
+			var clash := false
+			for c in car_spots:
+				if c.distance_to(t) < 3.0:
+					clash = true
+			if not clash:
+				car_spots.append(t + Vector3.UP * 0.9)
+	if car_spots.size() < 2:
+		car_spots.append(spawn_point + Vector3(2.5, 0.5, 0))
+		car_spots.append(spawn_point + Vector3(-2.5, 0.5, 0))
 	_make_routes(bpos)
+
+
+func _pick_hill(keep: Dictionary, bcx: int, bcz: int, tz: int, row_edge: int, cz: int, need: float) -> Vector2i:
+	var best := Vector2i(SIZE / 2 - 6, SIZE / 2 + 6)
+	var best_score := -INF
+	var roomiest := -INF
+	for cell in keep.keys():
+		var c: Vector2i = cell
+		var room := 99.0
+		room = minf(room, Vector2(c - Vector2i(bcx, bcz)).length() - 6.0)
+		room = minf(room, absf(c.y - tz) - 1.5)
+		room = minf(room, Vector2(c - Vector2i(SIZE / 2, SIZE / 2)).length() - 2.5)
+		room = minf(room, Vector2(c - Vector2i(row_edge, cz)).length() - 3.5)
+		if best_score == -INF and room > roomiest:
+			# Fallback if nothing fits: the roomiest spot, with a smaller hill.
+			roomiest = room
+			best = c
+			_hill_room = room
+		if room < need:
+			continue
+		# Prefer cells with land all around them.
+		var land := 0
+		for o in [Vector2i(4, 0), Vector2i(-4, 0), Vector2i(0, 4), Vector2i(0, -4), Vector2i(3, 3), Vector2i(-3, -3), Vector2i(3, -3), Vector2i(-3, 3)]:
+			if keep.has(c + o):
+				land += 1
+		var score := land * 2.0 + minf(room, need) + rng.randf()
+		if score > best_score:
+			best_score = score
+			best = c
+			_hill_room = need
+	return best
+
+
+## Stacked round mounds, one per tier, each a low-poly spherical cap you can walk or drive up.
+func _hill(base: Vector3, r0: float) -> void:
+	var y := base.y
+	var tier_mats := ["grass_b", "grass_hi", "grass_b", "grass_hi"]
+	var h := 1.15
+	for i in tiers:
+		var r := r0 * (tiers - i + 0.6) / (tiers + 0.6)
+		_cap(Vector3(base.x, y, base.z), r, h, mats[tier_mats[i]])
+		if i == tiers - 1:
+			y += h
+		else:
+			# The next tier sits where this mound's surface is at the next radius.
+			var r_next := r0 * (tiers - i - 0.4) / (tiers + 0.6)
+			var big := (r * r + h * h) / (2.0 * h)
+			y += sqrt(big * big - r_next * r_next) - (big - h)
+	hill_top = Vector3(base.x, y + 0.45, base.z)
+	coin_spots.append(hill_top)
+	for k in 4:
+		var a := TAU * k / 4.0
+		coin_spots.append(hill_top + Vector3(cos(a) * 0.9, -0.1, sin(a) * 0.9))
+	if tiers >= 2:
+		_label("KING OF THE HILL", hill_top + Vector3.UP * 1.4, 30)
+
+
+func _cap(c: Vector3, a: float, h: float, m: Material) -> void:
+	var big_r := (a * a + h * h) / (2.0 * h)
+	var segs := 20
+	var rings := 5
+	var pts := []
+	for ri in rings + 1:
+		var rr := a * float(ri) / rings * (0.94 if ri == rings else 1.0)
+		var yy := sqrt(maxf(big_r * big_r - rr * rr, 0.0)) - (big_r - h)
+		var row := []
+		for si in segs:
+			var ang := TAU * si / segs
+			row.append(Vector3(cos(ang) * rr, yy, sin(ang) * rr))
+		pts.append(row)
+	# skirt down into the ground so no gap shows at the edge
+	var skirt := []
+	for si in segs:
+		var ang := TAU * si / segs
+		skirt.append(Vector3(cos(ang) * a, -0.7, sin(ang) * a))
+	pts.append(skirt)
+	# Grass on top, a dirt band around the rim (separate surface) so the tier edge reads.
+	var mesh := ArrayMesh.new()
+	for part in 2:
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		st.set_smooth_group(-1)
+		var from := 0 if part == 0 else pts.size() - 2
+		var to := pts.size() - 2 if part == 0 else pts.size() - 1
+		for ri in range(from, to):
+			for si in segs:
+				var n := (si + 1) % segs
+				var p00: Vector3 = pts[ri][si]
+				var p01: Vector3 = pts[ri][n]
+				var p10: Vector3 = pts[ri + 1][si]
+				var p11: Vector3 = pts[ri + 1][n]
+				st.add_vertex(p00)
+				st.add_vertex(p11)
+				st.add_vertex(p01)
+				st.add_vertex(p00)
+				st.add_vertex(p10)
+				st.add_vertex(p11)
+		st.generate_normals()
+		st.commit(mesh)
+		mesh.surface_set_material(part, m if part == 0 else mats["dirt"])
+	var body := StaticBody3D.new()
+	body.position = c
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	body.add_child(mi)
+	var col := CollisionShape3D.new()
+	col.shape = mesh.create_trimesh_shape()
+	body.add_child(col)
+	add_child(body)
+
+
+## A wooden jump ramp for cars (and blobs with a run-up).
+func _ramp(at: Vector3, yaw: float) -> void:
+	var root := Node3D.new()
+	root.position = at
+	root.rotation.y = yaw
+	add_child(root)
+	var length := 2.6
+	var rise := 0.75
+	var slab := StaticBody3D.new()
+	var col := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(1.8, 0.15, sqrt(length * length + rise * rise))
+	col.shape = shape
+	slab.add_child(col)
+	var mi := MeshInstance3D.new()
+	var bm := BoxMesh.new()
+	bm.size = shape.size
+	mi.mesh = bm
+	mi.material_override = mats["wood"]
+	slab.add_child(mi)
+	slab.position = Vector3(0, rise / 2.0, 0)
+	slab.rotation.x = -atan2(rise, length)
+	root.add_child(slab)
+	for sx in [-0.85, 0.85]:
+		var stripe := MeshInstance3D.new()
+		var sm := BoxMesh.new()
+		sm.size = Vector3(0.12, 0.17, shape.size.z)
+		stripe.mesh = sm
+		stripe.material_override = mats["pad"]
+		stripe.position = Vector3(sx, 0, 0)
+		slab.add_child(stripe)
+	var post := MeshInstance3D.new()
+	var pm := BoxMesh.new()
+	pm.size = Vector3(1.6, rise, 0.15)
+	post.mesh = pm
+	post.material_override = mats["wood"]
+	post.position = Vector3(0, rise / 2.0, length / 2.0 - 0.1)
+	root.add_child(post)
+
+
+func _clear_of_busy(t: Vector3, d: float) -> bool:
+	for b in _busy:
+		if Vector2(b.x - t.x, b.z - t.z).length() < d:
+			return false
+	return true
+
+
+func _flat_around(t: Vector3, r: int) -> bool:
+	var cell := Vector2i(int(floor(t.x + _half)), int(floor(t.z + _half)))
+	for dx in range(-r, r + 1):
+		for dz in range(-r, r + 1):
+			var c := cell + Vector2i(dx, dz)
+			if not _tops.has(c) or _reserved.has(c) or absf(_tops[c] - t.y) > 0.01:
+				return false
+	return true
 
 
 func _flood(start: Vector2i) -> Dictionary:
@@ -210,6 +419,13 @@ func _make_mats() -> void:
 
 ## Top height of a buildable tile under p, or NAN if you can't build there.
 func build_top(p: Vector3) -> float:
+	for b in buildings:
+		var c: Vector3 = b["center"]
+		if absf(p.x - c.x) < BW / 2.0 and absf(p.z - c.z) < BD / 2.0 and p.y > b["roof_top"] - 0.4:
+			var cc := cell_center(p)
+			if Vector2(cc.x - (c.x - 1.6), cc.z - (c.z - 1.6)).length() < 0.9:
+				return NAN   # chimney
+			return b["roof_top"]
 	var cell := Vector2i(int(floor(p.x + _half)), int(floor(p.z + _half)))
 	if not _tops.has(cell) or _reserved.has(cell):
 		return NAN
@@ -445,35 +661,22 @@ func _building(id: int, c: Vector3) -> void:
 	var b := {"id": id, "center": c, "walls": [], "upper": [], "roof": [], "faded": false}
 	var hw := BW / 2.0
 	var hd := BD / 2.0
-	for fl in 2:
-		for side in ["front", "back", "left", "right"]:
-			_wall_side(b, fl, side, c.y + fl * FLOOR_H, fl == 0 and side == "front")
+	for side in ["front", "back", "left", "right"]:
+		_wall_side(b, 0, side, c.y, side == "front")
 
-	# Upper floor with a long opening along the back wall for the ramp.
-	var back := c.z - hd + WALL_T
-	var strip := 1.3
-	var hz1 := back + strip
-	var hole_left := c.x - 1.6
-	var sy := c.y + FLOOR_H
-	b["upper"].append(_box(Vector3(c.x, sy, (hz1 + c.z + hd) / 2.0), Vector3(BW, 0.2, c.z + hd - hz1), mats["floor"], id))
-	b["upper"].append(_box(Vector3((c.x - hw + hole_left) / 2.0, sy, (c.z - hd + hz1) / 2.0), Vector3(hole_left - (c.x - hw), 0.2, hz1 - (c.z - hd)), mats["floor"], id))
-	# Ramp rising from the back-right corner up to the upper floor.
-	var x_low := c.x + hw - WALL_T - 0.05
-	var x_high := hole_left
-	var rise := FLOOR_H + 0.1
-	var run := x_low - x_high
-	var ramp := _box(Vector3((x_low + x_high) / 2.0, c.y + rise / 2.0 - 0.07, back + strip / 2.0), Vector3(sqrt(rise * rise + run * run), 0.15, strip - 0.05), mats["floor"], id)
-	ramp.get_parent().rotation.z = -atan2(rise, run)
-
-	# Roof, chimney, and the chest that rewards getting up there.
-	var roof_y := c.y + 2.0 * FLOOR_H
+	# Flat roof (you can build turrets and lasers on it), chimney, low parapet, and the
+	# chest that rewards getting up there.
+	var roof_y := c.y + FLOOR_H
 	b["roof"].append(_box(Vector3(c.x, roof_y, c.z), Vector3(BW + 0.4, 0.25, BD + 0.4), mats["roof"], id))
 	b["roof"].append(_box(Vector3(c.x - 1.6, roof_y + 0.6, c.z - 1.6), Vector3(0.6, 1.0, 0.6), mats["roof"], id))
 	chest_point = Vector3(c.x - 0.6, roof_y + 0.45, c.z + 1.0)
 	b["roof_top"] = roof_y + 0.125
+	for side in [-1.0, 1.0]:
+		b["roof"].append(_box(Vector3(c.x, roof_y + 0.25, c.z + side * (hd + 0.1)), Vector3(BW + 0.4, 0.3, 0.2), mats["wall"], id))
+		b["roof"].append(_box(Vector3(c.x + side * (hw + 0.1), roof_y + 0.25, c.z), Vector3(0.2, 0.3, BD), mats["wall"], id))
 
 	# Outside ladder up the back wall to the roof.
-	_ladder(Vector3(c.x + 0.6, c.y, c.z - hd - 0.08), 2.0 * FLOOR_H + 0.3, Vector3(0, 0, -1))
+	_ladder(Vector3(c.x + 0.6, c.y, c.z - hd - 0.08), FLOOR_H + 0.6, Vector3(0, 0, -1))
 
 	# Elevator up the right-hand side.
 	lift = Elevator.new()
@@ -482,7 +685,7 @@ func _building(id: int, c: Vector3) -> void:
 	lift.position = Vector3(c.x + hw + 0.85, c.y - 0.1, c.z)
 	add_child(lift)
 	for pz in [-0.95, 0.95]:
-		_box(Vector3(c.x + hw + 0.85, c.y + FLOOR_H, c.z + pz), Vector3(0.12, FLOOR_H * 2.0 + 0.6, 0.12), mats["metal"], -1, false)
+		_box(Vector3(c.x + hw + 0.85, c.y + FLOOR_H / 2.0 + 0.3, c.z + pz), Vector3(0.12, FLOOR_H + 0.6, 0.12), mats["metal"], -1, false)
 	buildings.append(b)
 
 
@@ -521,8 +724,6 @@ func _wall_side(b: Dictionary, fl: int, side: String, y0: float, door: bool) -> 
 				g.position = Vector3(mid, y0 + 1.2, fixed) if along_x else Vector3(fixed, y0 + 1.2, mid)
 				g.set_meta("building", b["id"])
 				add_child(g)
-				if fl == 1:
-					b["upper"].append(g)
 		u += length
 
 
@@ -531,8 +732,6 @@ func _wall_piece(b: Dictionary, fl: int, along_x: bool, mid: float, fixed: float
 	var size := Vector3(length, h, WALL_T) if along_x else Vector3(WALL_T, h, length)
 	var mi := _box(center, size, mats["wall"], b["id"])
 	b["walls"].append(mi)
-	if fl == 1:
-		b["upper"].append(mi)
 
 
 ## A ladder against a wall. `out` points away from the wall, toward where you climb.
@@ -617,20 +816,15 @@ func _make_routes(c: Vector3) -> void:
 	var hd := BD / 2.0
 	var y := c.y
 	var door_x := c.x - hw + 1.6
-	var back := c.z - hd + WALL_T
 	var roof_top: float = buildings[0]["roof_top"]
 	var door_out := Vector3(door_x, y, c.z + hd + 0.9)
 	var door_in := Vector3(door_x, y, c.z + hd - 1.0)
-	var ramp_low := Vector3(c.x + hw - 0.7, y, back + 0.65)
-	var ramp_high := Vector3(c.x - 2.2, y + FLOOR_H, back + 0.65)
 	var lift_spot := Vector3(c.x + hw + 0.85, y, c.z)
 	var lift_wait := Vector3(c.x + hw + 0.85, y, c.z + 1.8)
 	var roof_edge := Vector3(c.x - hw + 0.2, roof_top, c.z)
 	var below := Vector3(c.x - hw - 1.2, y, c.z)
 	_edge("out", "in", door_out, door_in)
 	_edge("in", "out", door_in, door_out)
-	_edge("in", "f2", ramp_low, ramp_high)
-	_edge("f2", "in", ramp_high, ramp_low)
 	_edge("out", "roof", lift_wait, lift_spot, "lift")
 	_edge("roof", "out", roof_edge, below)
 	var a_land := _hinge_a - Vector3(_side * 1.0, 0, 0)
@@ -661,8 +855,6 @@ func zone(p: Vector3) -> String:
 	if absf(p.x - c.x) < BW / 2.0 + 0.1 and absf(p.z - c.z) < BD / 2.0 + 0.1:
 		if p.y > roof_top - 0.3:
 			return "roof"
-		if p.y > c.y + FLOOR_H - 0.2:
-			return "f2"
 		return "in"
 	return "out"
 
@@ -729,15 +921,11 @@ func update_xray(player_pos: Vector3, cam_pos: Vector3) -> void:
 			blocking = body.get_meta("building")
 	for b in buildings:
 		var c: Vector3 = b["center"]
-		var inside := absf(player_pos.x - c.x) < BW / 2.0 and absf(player_pos.z - c.z) < BD / 2.0 and player_pos.y < c.y + 2.0 * FLOOR_H and player_pos.y > c.y - 0.5
+		var inside := absf(player_pos.x - c.x) < BW / 2.0 and absf(player_pos.z - c.z) < BD / 2.0 and player_pos.y < c.y + FLOOR_H and player_pos.y > c.y - 0.5
 		var fade: bool = inside or blocking == b["id"]
 		if fade != b["faded"]:
 			b["faded"] = fade
 			for w in b["walls"]:
 				(w as MeshInstance3D).material_override = mats["wall_fade"] if fade else mats["wall"]
-		var hide_upper := inside and player_pos.y < c.y + FLOOR_H + 0.2
-		for n in b["upper"]:
-			if is_instance_valid(n):
-				(n as Node3D).visible = not hide_upper
 		for n in b["roof"]:
 			(n as Node3D).visible = not inside

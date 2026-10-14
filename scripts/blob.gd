@@ -34,6 +34,11 @@ var net_t := 0.0
 var _righting := 0.0
 var _crash_cd := 0.0
 var _net: Node3D
+var _trick := ""
+var _trick_t := 0.0
+var _trick_len := 0.5
+var _trick_turns := 1.0
+var _yaw := 0.0
 
 
 func _ready() -> void:
@@ -57,6 +62,14 @@ func _ready() -> void:
 	contact_monitor = true
 	max_contacts_reported = 3
 	body_entered.connect(_on_body_hit)
+
+
+## Cosmetic acrobatics on the visual: "flip" (somersault), "spin" (pirouette), "barrel" (roll).
+func trick(kind: String, length := 0.5, turns := 1.0) -> void:
+	_trick = kind
+	_trick_t = 0.0
+	_trick_len = length
+	_trick_turns = turns
 
 
 ## Physics tumble: rotation unlocks and the blob spins and bounces until t runs out.
@@ -231,6 +244,7 @@ func die() -> void:
 	main.sfx.play("pop", global_position, voice)
 	var tw := create_tween()
 	tw.tween_property(visual, "scale", Vector3(1.6, 0.35, 1.6), 0.12)
+	tw.parallel().tween_property(visual, "rotation:y", visual.rotation.y + TAU, 0.2)
 	tw.tween_callback(func() -> void:
 		main.fx.splat(global_position + Vector3.DOWN * radius * 0.8, color, radius * 3.2)
 		main.fx.burst(global_position, color, 16))
@@ -292,7 +306,24 @@ func _physics_process(delta: float) -> void:
 	# Cosmetic only: turn toward facing, squash with speed, stretch when airborne.
 	_t += delta
 	squash = squash.lerp(Vector3.ONE, 8.0 * delta)
-	visual.rotation.y = lerp_angle(visual.rotation.y, atan2(facing.x, facing.z), 12.0 * delta)
+	_yaw = lerp_angle(_yaw, atan2(facing.x, facing.z), 12.0 * delta)
+	var rx := 0.0
+	var ry := 0.0
+	var rz := 0.0
+	if _trick != "":
+		_trick_t += delta
+		var k := clampf(_trick_t / _trick_len, 0.0, 1.0)
+		var ang := k * k * (3.0 - 2.0 * k) * TAU * _trick_turns
+		match _trick:
+			"flip":
+				rx = ang
+			"spin":
+				ry = ang
+			"barrel":
+				rz = ang
+		if k >= 1.0:
+			_trick = ""
+	visual.rotation = Vector3(rx, _yaw + ry, rz)
 	var sp := clampf(flat_v.length() / 10.0, 0.0, 0.2)
 	var bob := sin(_t * 9.0) * (0.05 if moving else 0.02)
 	var vy := clampf(linear_velocity.y / 12.0, -0.25, 0.25)
