@@ -1,5 +1,23 @@
-# Blob Island (prototype)
+# Blob Island
 
+A physics-driven isometric action game I built in Godot 4.7 in October 2026. You play a blob defending an island: collect coins by day, build turrets and traps, survive a wave every night, and beat a boss every fifth night to unlock the next island.
+
+**Play it in the browser:** https://ishu-dev.github.io/blob-island/ (desktop, keyboard and mouse)
+
+| Lobby | Snow island |
+|---|---|
+| ![Lobby](docs/lobby.png) | ![Snow island](docs/island.png) |
+| **Driving on the desert island** | **Building turrets on the roof** |
+| ![Driving](docs/drive.png) | ![Roof build](docs/roof.png) |
+
+## What's in it
+- About 7,250 lines of GDScript across 28 scripts. There are no scene files beyond `main.tscn`; the islands, buildings, vehicles and UI are all generated in code
+- Jolt physics: ragdolls, throwable crates and enemies, raycast-suspension cars with flips and stunts
+- 4 biomes, 5 enemy types plus a boss, 7 guns, 5 tower types, random weather with a day/night cycle
+- A lobby with persistent progress: brawlers, gun and car upgrades, cosmetics, a trophy road
+- A command-line screenshot harness (`--screenshot`, `--level`, `--at=roof` and more) that I used to test each build without playing through it
+
+## Development notes
 Godot 4.7, Jolt physics, orthographic isometric camera. Everything is built in code from `scripts/main.gd`.
 
 ## Run
